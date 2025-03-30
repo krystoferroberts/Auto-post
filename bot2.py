@@ -10,162 +10,118 @@ from aiogram.enums import ChatType
 from aiogram.client.session.aiohttp import AiohttpSession
 from config import TOKEN, CHANNEL_ID, ADMIN_IDS
 
-# Создаем объект бота
+# Инициализация объектов
 session = AiohttpSession()
-bot = Bot(token=TOKEN, parse_mode=None, session=session)
-
-# Создаем Dispatcher (БЕЗ АРГУМЕНТА bot)
+bot = Bot(token=TOKEN, session=session)
 dp = Dispatcher()
 
-# Папка для хранения постов
+# Конфигурация
 POSTS_DIR = "posts"
+BAN_LIST_FILE = "banned_users.json"
 os.makedirs(POSTS_DIR, exist_ok=True)
 
-# Файл для забаненных пользователей
-BANNED_USERS_FILE = "banned_users.json"
-if not os.path.exists(BANNED_USERS_FILE):
-    with open(BANNED_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump([], f)
-
-# Словарь для хранения ID всех сообщений в каждом чате
-chat_message_ids = {}
-
-# Функции для работы с банами
 def load_banned_users():
-    with open(BANNED_USERS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(BAN_LIST_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
-def save_banned_users(users):
-    with open(BANNED_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False)
+def save_banned_users(banned_users):
+    with open(BAN_LIST_FILE, "w") as f:
+        json.dump(banned_users, f)
 
-# Игнорируем сообщения в группах и каналах
-@dp.message(F.chat.type.in_([ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL]))
-async def ignore_group_messages(message: Message):
-    return
+@dp.message(Command("start"))
+async def start(message: Message):
+    await message.answer("👋 Отправь мне пост (текст или фото с подписью)")
 
-# Прием постов только в личных сообщениях (текст и фото)
-@dp.message(F.chat.type == ChatType.PRIVATE, F.content_type.in_([types.ContentType.TEXT, types.ContentType.PHOTO]))
-async def receive_post(message: Message):
-    user_id = message.from_user.id
-
-    # Проверяем бан
-    banned_users = load_banned_users()
-    if user_id in banned_users:
-        await message.reply("⛔ Вы заблокированы и не можете отправлять посты.")
-        return
-
-    user_file = os.path.join(POSTS_DIR, f"{user_id}.json")
-    post_data = {
-        "text": message.caption if message.photo else message.text,
-        "photo": message.photo[-1].file_id if message.photo else None,
-        "time": datetime.now().isoformat()
-    }
-
-    with open(user_file, "w", encoding="utf-8") as f:
-        json.dump(post_data, f, ensure_ascii=False)
-
-    await message.reply("✅ Ваш пост сохранен и будет опубликован в ближайшее время.")
-
-# Публикация постов раз в 2 часа
-async def post_scheduler():
-    while True:
-        try:
-            # Удаляем все предыдущие сообщения бота в каждом чате
-            for chat_id in CHANNEL_ID:
-                if chat_id in chat_message_ids:
-                    for message_id in chat_message_ids[chat_id]:
-                        try:
-                            await bot.delete_message(chat_id, message_id)
-                        except TelegramBadRequest as e:
-                            print(f"⚠️ Не удалось удалить сообщение в {chat_id}: {e}")
-                    chat_message_ids[chat_id] = []  # Очищаем список сообщений
-
-            # Публикуем все посты
-            for filename in os.listdir(POSTS_DIR):
-                file_path = os.path.join(POSTS_DIR, filename)
-
-                with open(file_path, "r", encoding="utf-8") as f:
-                    post_data = json.load(f)
-
-                # Отправляем пост во все каналы/группы
-                for chat_id in CHANNEL_ID:
-                    try:
-                        if post_data["photo"]:
-                            sent_message = await bot.send_photo(chat_id, post_data["photo"], caption=post_data["text"])
-                        else:
-                            sent_message = await bot.send_message(chat_id, post_data["text"])
-
-                        # Сохраняем ID нового сообщения
-                        if chat_id not in chat_message_ids:
-                            chat_message_ids[chat_id] = []
-                        chat_message_ids[chat_id].append(sent_message.message_id)
-
-                    except TelegramBadRequest:
-                        print(f"⚠️ Бот не может отправить сообщение в {chat_id}. Возможно, он удален из группы/канала.")
-
-            await asyncio.sleep(43200)  # Ждем 2 часа перед следующей отправкой
-        except Exception as e:
-            print(f"Ошибка в post_scheduler: {e}")
-
-# Команда /ban <user_id> - бан пользователя
-@dp.message(Command("ban"))
+@dp.message(Command("ban"), F.from_user.id.in_(ADMIN_IDS))
 async def ban_user(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
     try:
         user_id = int(message.text.split()[1])
         banned_users = load_banned_users()
         if user_id not in banned_users:
             banned_users.append(user_id)
             save_banned_users(banned_users)
-            await message.reply(f"✅ Пользователь {user_id} заблокирован.")
-        else:
-            await message.reply("⚠️ Пользователь уже в бане.")
-    except:
-        await message.reply("❌ Ошибка! Используйте: /ban <user_id>")
+            await message.answer(f"🚫 Пользователь {user_id} забанен")
+    except (IndexError, ValueError):
+        await message.answer("❌ Используй: /ban <user_id>")
 
-# Команда /unban <user_id> - разбан пользователя
-@dp.message(Command("unban"))
+@dp.message(Command("unban"), F.from_user.id.in_(ADMIN_IDS))
 async def unban_user(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
     try:
         user_id = int(message.text.split()[1])
         banned_users = load_banned_users()
         if user_id in banned_users:
             banned_users.remove(user_id)
             save_banned_users(banned_users)
-            await message.reply(f"✅ Пользователь {user_id} разбанен.")
-        else:
-            await message.reply("⚠️ Пользователь не был в бане.")
-    except:
-        await message.reply("❌ Ошибка! Используйте: /unban <user_id>")
+            await message.answer(f"✅ Пользователь {user_id} разбанен")
+    except (IndexError, ValueError):
+        await message.answer("❌ Используй: /unban <user_id>")
 
-# Команда /all_posts - просмотр всех постов
-@dp.message(Command("all_posts"))
-async def all_posts(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+@dp.message(F.chat.type == ChatType.PRIVATE, F.content_type.in_({'text', 'photo'}))
+async def receive_post(message: Message):
+    user_id = message.from_user.id
+    banned_users = load_banned_users()
+    
+    if user_id in banned_users and message.from_user.id not in ADMIN_IDS:
+        await message.answer("⛔ У тебя нет прав для отправки постов.")
         return
 
-    posts_text = []
-    for filename in os.listdir(POSTS_DIR):
-        user_id = filename.replace(".json", "")
-        with open(os.path.join(POSTS_DIR, filename), "r", encoding="utf-8") as f:
-            post_data = json.load(f)
-            posts_text.append(f"👤 User ID: {user_id}\n📜 Post: {post_data['text']}\n")
+    post_data = {
+        "text": message.caption if message.photo else message.text,
+        "photo": message.photo[-1].file_id if message.photo else None,
+        "time": datetime.now().isoformat()
+    }
+    
+    user_file = os.path.join(POSTS_DIR, f"{user_id}.json")
+    with open(user_file, "w", encoding="utf-8") as f:
+        json.dump(post_data, f, ensure_ascii=False)
+    
+    await message.reply("✅ Ваш пост сохранен и будет опубликован в ближайшее время.")
 
-    if posts_text:
-        await message.reply("\n".join(posts_text))
-    else:
-        await message.reply("🔍 Постов пока нет.")
+async def post_scheduler():
+    while True:
+        now = datetime.now()
+        for filename in os.listdir(POSTS_DIR):
+            if filename.endswith(".json"):
+                file_path = os.path.join(POSTS_DIR, filename)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        post_data = json.load(f)
+                    
+                    post_time = datetime.fromisoformat(post_data["time"])
+                    if now - post_time >= timedelta(hours=2):
+                        user_id = int(filename.split(".")[0])
+                        banned_users = load_banned_users()
+                        
+                        if user_id not in banned_users:
+                            for chat_id in CHANNEL_ID:
+                                try:
+                                    if post_data["photo"]:
+                                        await bot.send_photo(
+                                            chat_id=chat_id,
+                                            photo=post_data["photo"],
+                                            caption=post_data["text"]
+                                        )
+                                    else:
+                                        await bot.send_message(
+                                            chat_id=chat_id,
+                                            text=post_data["text"]
+                                        )
+                                    os.remove(file_path)
+                                except TelegramBadRequest as e:
+                                    print(f"Ошибка отправки в чат {chat_id}: {e}")
+                except Exception as e:
+                    print(f"Ошибка обработки файла {filename}: {str(e)}")
+        
+        await asyncio.sleep(60)
 
-# Запуск бота
 async def main():
-    asyncio.create_task(post_scheduler())
-    await dp.start_polling(bot)
+    await asyncio.gather(
+        dp.start_polling(bot),
+        post_scheduler()
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
